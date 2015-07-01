@@ -1648,9 +1648,12 @@ ROS3D.OccupancyGrid = function(options) {
 
   // create the mesh
   THREE.Mesh.call(this, geom, material);
-  // move the map so the corner is at 0, 0
-  this.position.x = (width * message.info.resolution) / 2;
-  this.position.y = (height * message.info.resolution) / 2;
+  // move the map so the corner is at X, Y and correct orientation (informations from message.info)
+  this.useQuaternion = true;
+  this.quaternion = message.info.origin.orientation;
+  this.position.x = (width * message.info.resolution) / 2 + message.info.origin.position.x;
+  this.position.y = (height * message.info.resolution) / 2 + message.info.origin.position.y;
+  this.position.z = message.info.origin.position.z;
   this.scale.x = message.info.resolution;
   this.scale.y = message.info.resolution;
 };
@@ -1710,8 +1713,7 @@ ROS3D.OccupancyGridClient = function(options) {
       that.currentGrid = new ROS3D.SceneNode({
         frameID : message.header.frame_id,
         tfClient : that.tfClient,
-        object : newGrid,
-        pose : message.info.origin
+        object : newGrid
       });
     } else {
       that.currentGrid = newGrid;
@@ -2347,6 +2349,187 @@ ROS3D.MarkerClient = function(options) {
   });
 };
 ROS3D.MarkerClient.prototype.__proto__ = EventEmitter2.prototype;
+
+/**
+ * @author Brad Campbell - bradjc@umich.edu
+ */
+
+/**
+ * Create a THREE arrow object from a geometry_msgs/PoseStamped message.
+ *
+ * @constructor
+ * @param options - object with following keys:
+ *
+ *   * path - the base path or URL for any mesh files that will be loaded for this marker
+ *   * message - the marker message
+ *   * loader (optional) - the Collada loader to use (e.g., an instance of ROS3D.COLLADA_LOADER
+ *                         ROS3D.COLLADA_LOADER_2) -- defaults to ROS3D.COLLADA_LOADER_2
+ */
+ROS3D.Pose = function(options) {
+  options = options || {};
+  var path = options.path || '/';
+  var message = options.message;
+  var loader = options.loader || ROS3D.COLLADA_LOADER_2;
+
+  // check for a trailing '/'
+  if (path.substr(path.length - 1) !== '/') {
+    path += '/';
+  }
+
+  THREE.Object3D.call(this);
+
+  // Make it blue
+  this.msgColor = {
+    r: 0.0,
+    g: 0.0,
+    b: 1.0,
+    a: 1.0
+  };
+
+  // Set the pose and get the color
+  var colorMaterial = ROS3D.makeColorMaterial(this.msgColor.r,
+                                              this.msgColor.g,
+                                              this.msgColor.b,
+                                              this.msgColor.a);
+  // Properties of the arrow that will be displayed
+  var len = 1;
+  var headLength = len * 0.23;
+  var headDiameter = 0.2;
+  var shaftDiameter = headDiameter * 0.5;
+
+  // Create the arrow
+  var origin = new THREE.Vector3(message.pose.position.x,
+                                 message.pose.position.y,
+                                 message.pose.position.z);
+  var direction = new THREE.Vector3(1,0,0);
+
+  var q = new THREE.Quaternion(message.pose.orientation.x,
+                                         message.pose.orientation.y,
+                                         message.pose.orientation.z,
+                                         message.pose.orientation.w);
+  direction.applyQuaternion(q);
+  direction.normalize();
+
+  // Add the arrow
+  this.add(new ROS3D.Arrow({
+    direction : direction,
+    origin : origin,
+    length : len,
+    headLength : headLength,
+    shaftDiameter : shaftDiameter,
+    headDiameter : headDiameter,
+    material : colorMaterial
+  }));
+};
+ROS3D.Pose.prototype.__proto__ = THREE.Object3D.prototype;
+
+/**
+ * Update this marker.
+ *
+ * @param message - the marker message
+ * @return true on success otherwhise false is returned
+ */
+ROS3D.Pose.prototype.update = function(message) {
+  return true;
+};
+
+/*
+ * Free memory of elements in this marker.
+ */
+ROS3D.Pose.prototype.dispose = function() {
+  this.children.forEach(function(element) {
+    if (element instanceof ROS3D.MeshResource) {
+      element.children.forEach(function(scene) {
+        if (scene.material !== undefined) {
+          scene.material.dispose();
+        }
+        scene.children.forEach(function(mesh) {
+          if (mesh.geometry !== undefined) {
+            mesh.geometry.dispose();
+          }
+          if (mesh.material !== undefined) {
+            mesh.material.dispose();
+          }
+          scene.remove(mesh);
+        });
+        element.remove(scene);
+      });
+    } else {
+      if (element.geometry !== undefined) {
+          element.geometry.dispose();
+      }
+      if (element.material !== undefined) {
+          element.material.dispose();
+      }
+    }
+    element.parent.remove(element);
+  });
+};
+
+/**
+ * @author Brad Campbell - bradjc@umich.edu
+ */
+
+/**
+ * A client for displaying poses 'geometry_msgs/PoseStamped'
+ *
+ * Emits the following events:
+ *
+ *  * 'change' - there was an update or change in the marker
+ *
+ * @constructor
+ * @param options - object with following keys:
+ *
+ *   * ros - the ROSLIB.Ros connection handle
+ *   * topic - the marker topic to listen to
+ *   * tfClient - the TF client handle to use
+ *   * rootObject (optional) - the root object to add this marker to
+ *   * path (optional) - the base path to any meshes that will be loaded
+ *   * loader (optional) - the Collada loader to use (e.g., an instance of ROS3D.COLLADA_LOADER
+ *                         ROS3D.COLLADA_LOADER_2) -- defaults to ROS3D.COLLADA_LOADER_2
+ */
+ROS3D.PoseClient = function(options) {
+  var that = this;
+  options = options || {};
+  var ros = options.ros;
+  var topic = options.topic;
+  this.tfClient = options.tfClient;
+  this.rootObject = options.rootObject || new THREE.Object3D();
+  this.path = options.path || '/';
+  this.loader = options.loader || ROS3D.COLLADA_LOADER_2;
+
+  // Markers that are displayed (Map ns+id--Marker)
+  this.poses = {};
+
+  // subscribe to the topic
+  var rosTopic = new ROSLIB.Topic({
+    ros : ros,
+    name : topic,
+    messageType : 'geometry_msgs/PoseStamped',
+    compression : 'png'
+  });
+  rosTopic.subscribe(function(message) {
+
+    var newPose = new ROS3D.Pose({
+      message : message,
+      path : that.path,
+      loader : that.loader
+    });
+
+    // remove old marker from Three.Object3D children buffer
+    that.rootObject.remove(that.poses[message.ns + message.id]);
+
+    that.poses[message.ns + message.id] = new ROS3D.SceneNode({
+      frameID : message.header.frame_id,
+      tfClient : that.tfClient,
+      object : newPose
+    });
+    that.rootObject.add(that.poses[message.ns + message.id]);
+
+    that.emit('change');
+  });
+};
+ROS3D.PoseClient.prototype.__proto__ = EventEmitter2.prototype;
 
 /**
  * @author David Gossow - dgossow@willowgarage.com
@@ -2998,6 +3181,7 @@ ROS3D.Viewer = function(options) {
     y : 3,
     z : 3
   };
+  var cameraZoomSpeed = options.cameraZoomSpeed || 0.5;
 
   // create the canvas to render to
   this.renderer = new THREE.WebGLRenderer({
@@ -3022,7 +3206,7 @@ ROS3D.Viewer = function(options) {
     scene : this.scene,
     camera : this.camera
   });
-  this.cameraControls.userZoomSpeed = 0.5;
+  this.cameraControls.userZoomSpeed = cameraZoomSpeed;
 
   // lights
   this.scene.add(new THREE.AmbientLight(0x555555));
@@ -3085,6 +3269,18 @@ ROS3D.Viewer.prototype.addObject = function(object, selectable) {
   } else {
     this.scene.add(object);
   }
+};
+
+/**
+ * Resize 3D viewer
+ *
+ * @param width - new width value
+ * @param height - new height value
+ */
+ROS3D.Viewer.prototype.resize = function(width, height) {
+  this.camera.aspect = width / height;
+  this.camera.updateProjectionMatrix();
+  this.renderer.setSize(width, height);
 };
 
 /**
